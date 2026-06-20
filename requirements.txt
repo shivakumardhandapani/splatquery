@@ -1,0 +1,24 @@
+# Core
+numpy>=1.26
+scipy>=1.11
+pyyaml>=6.0
+tqdm>=4.66
+Pillow>=10.0
+
+# Vision-language perception
+torch>=2.2          # install the CUDA build matching your driver (see README)
+torchvision>=0.17
+open-clip-torch>=2.24      # CLIP image/text encoders
+# SAM 2 (Segment Anything 2) is installed from source - see README.
+# pip install "git+https://github.com/facebookresearch/sam2.git"
+
+# Optional depth (only needed for datasets without ground-truth depth, e.g. LERF)
+# transformers>=4.40   # for Depth-Anything-V2 via HF; uncomment if you use it
+
+# 3D
+open3d>=0.18        # point clouds, viz, geometry ops
+scikit-learn>=1.4   # DBSCAN clustering for detection -> object fusion
+
+# LLM backends
+anthropic>=0.40     # Claude API backend
+openai>=1.40        # local-LLM backend (OpenAI-compatible: Ollama / vLLM / LM Studio)

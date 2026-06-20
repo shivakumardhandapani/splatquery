@@ -1,0 +1,41 @@
+# SplatQuery default configuration.
+# Override any field with --set key=value on the CLI, or point to a copy of this file.
+
+device: cuda                  # cuda | cpu  (cpu works for the LLM/query stages, not for SAM2/CLIP at speed)
+
+dataset:
+  type: replica               # replica | nerfstudio  (replica ships ground-truth depth -> easiest first run)
+  root: data/replica/room_0   # path to the scene folder on your machine
+  stride: 5                   # use every Nth frame (lower = denser map, slower build)
+  max_frames: 200             # cap frames for a quick first build; null for all
+  depth_scale: 6553.5         # Replica depth png is uint16 in mm*... ; see loader docstring
+  # For nerfstudio scenes without depth, set depth_source below.
+  depth_source: gt            # gt | mono   (mono = estimate depth with Depth-Anything-V2)
+
+perception:
+  sam2_checkpoint: checkpoints/sam2.1_hiera_small.pt
+  sam2_config: configs/sam2.1/sam2.1_hiera_s.yaml
+  clip_model: ViT-B-16
+  clip_pretrained: laion2b_s34b_b88k
+  min_mask_area: 900          # drop tiny masks (px)
+  max_masks_per_frame: 40     # keep the N largest masks per frame
+  crop_padding: 0.15          # pad each mask crop by this fraction before CLIP encoding
+
+mapping:
+  voxel_size: 0.02            # downsample point cloud (m) before fusion
+  cluster_eps: 0.10           # DBSCAN epsilon for merging detections into objects (m)
+  cluster_min_points: 30      # min points for a valid object node
+  merge_sim_threshold: 0.85   # cosine sim above which nearby detections are treated as same object
+
+agent:
+  backend: claude             # claude | local   ("design for both" -> swap here, nothing else changes)
+  claude_model: claude-opus-4-8
+  local_base_url: http://localhost:11434/v1   # Ollama default; vLLM/LM Studio also work
+  local_model: qwen2.5:7b-instruct
+  query_expansions: 6         # how many synonym phrases the LLM generates per concept
+  top_k: 5                    # candidate objects retrieved from the map per query
+
+robotics:
+  robot_height: 0.4           # camera/sensor height of the mobile base (m)
+  standoff: 0.8               # how far in front of the target the goal pose sits (m)
+  frame: world                # output goal pose frame
