@@ -1,144 +1,111 @@
-# SplatQuery — language-grounded 3D scene understanding for robots
+# SplatQuery — talk to a 3D scene
 
-Talk to a reconstructed 3D scene in plain language and get back a **3D location**
-and a **robot navigation goal**:
+**Open-vocabulary, language-grounded 3D scene understanding.** Reconstruct a room from posed RGB-D, then ask for things in plain English — *"go to the lamp"*, *"what is near the sofa?"* — and SplatQuery finds the object in 3D and returns either a robot navigation goal or a spatial answer. Open-vocabulary (no fixed label list), and it runs **fully local** on a single consumer GPU — no cloud, no API keys.
 
-> "where can I find something to drink?" → object 14 at (1.32, 0.41, 2.05) m → stand at (0.78, 0.40, 1.60) m, face 122°
+![SplatQuery grounding the query "a sofa" onto the sofa in a reconstructed room](docs/sofa_grounding.png)
 
-Open-vocabulary (no fixed label set), runs on a single consumer GPU (RTX 4070),
-and swaps between a cloud LLM and an on-device LLM with one config flag.
-
-This is the MVP (pass 1): a **discrete semantic object map** built from posed
-RGB-D frames. The architecture is deliberately set up so pass 2 (a trained,
-continuous **language-embedded Gaussian field**, LangSplat / FMGS style) drops
-in behind the same `SemanticMap.query()` interface.
+*The query `"a sofa"` grounded back onto the real frames: the matched 3D object's points (red) projected onto the sofa it was retrieved from. No object labels were used anywhere in the pipeline — the match comes purely from CLIP image/text similarity over a 3D object map.*
 
 ---
 
-## Why this project exists
+## What it does
 
-It sits on top of a 3D-reconstruction stack (COLMAP → SfM → 3D Gaussian
-Splatting, CUDA) and adds the VLM + LLM "brain": open-vocabulary perception,
-a language→geometry grounding layer, and a robot-actionable output. That
-combination — perception + deep learning + enough robotics to produce an action
-goal — is exactly what current VLM/VLA robotics roles screen for.
-
-## Pipeline
+Given a stream of posed RGB-D frames, SplatQuery builds a queryable **3D semantic object map**, then grounds natural-language instructions against it:
 
 ```
 posed RGB-D ─▶ SAM2 masks ─▶ CLIP region embeddings ─▶ lift to 3D
             ─▶ fuse detections into object nodes (the semantic map)
-            ─▶ LLM grounding agent (instruction → intent + target phrases)
+            ─▶ LLM grounding agent (instruction → intent + target)
             ─▶ CLIP retrieval over the map
-            ─▶ navigation goal pose  /  spatial Q&A
+            ─▶ navigation goal pose   /   spatial Q&A
 ```
 
-| Module | File | Role |
+The grounding agent runs on a **local LLM** (Qwen2.5 via Ollama): it classifies the instruction (navigate vs. ask), expands the target into CLIP-friendly phrases, and — for questions — composes a spatial answer from the retrieved objects' 3D positions.
+
+## It works (real output, local LLM)
+
+Navigation — *"go to the lamp"* resolves to a 3D object and a standoff goal pose:
+
+```
+intent=navigate  target="lamp"  phrases=['lamp','table lamp','floor lamp','reading lamp','desk lamp','light']
+NAV GOAL -> object 6 (match 0.29)
+  stand at: (3.02, -0.73, -0.17) m
+  face yaw: -171.1 deg, standoff 0.80 m
+```
+
+Spatial Q&A — *"what is near the sofa?"* is routed to a question and answered, not driven to:
+
+```
+intent=ask  target="sofa"
+ANSWER: The sofa is near a large object at (6.16, 2.55, -1.45) ...
+```
+
+The intent split (navigate vs. ask) is decided by the LLM, so the same interface handles both commands and questions.
+
+## How it's built
+
+| Stage | What runs | Where |
 |---|---|---|
-| Data | `splatquery/data/dataset.py` | Posed RGB-D loaders (Replica, nerfstudio) |
-| Perception | `splatquery/perception/` | SAM2 masks + CLIP region/text embeddings |
-| Mapping | `splatquery/mapping/` | Back-project to 3D, fuse into a queryable object map |
-| Agent | `splatquery/agent/` | Dual LLM backend + language→target grounding |
-| Robotics | `splatquery/robotics/` | Grounded target → navigation goal pose |
+| Perception | SAM2 open-vocabulary masks + CLIP region embeddings | `splatquery/perception/` |
+| Lifting | back-project masked regions to 3D via depth + pose | `splatquery/mapping/lifting.py` |
+| Fusion | cluster + floor-aware union-find merge into objects | `splatquery/mapping/semantic_map.py` |
+| Grounding | dual LLM backend (local Qwen / Claude) + retrieval | `splatquery/agent/` |
+| Output | grounded object → navigation goal pose | `splatquery/robotics/navigation.py` |
 
----
+A key design choice is **detection caching**: the expensive perception pass (SAM2 + CLIP, minutes) is saved to disk, so the cheap fusion step can be re-tuned and the map rebuilt in seconds (`scripts/03_refuse.py`).
 
-## Setup (Ubuntu + NVIDIA, e.g. RTX 4070 laptop)
+## Quickstart
+
+Built and tested on Ubuntu 22.04 (WSL2) + RTX 4070, CUDA 12.1.
 
 ```bash
-# 1. environment
+# 1. perception environment
 conda create -n splatquery python=3.10 -y && conda activate splatquery
-
-# 2. PyTorch matching your CUDA (check `nvidia-smi`); example for CUDA 12.1:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# 3. the rest
 pip install -r requirements.txt
-
-# 4. SAM 2 (from source) + a checkpoint
 pip install "git+https://github.com/facebookresearch/sam2.git"
-mkdir -p checkpoints && cd checkpoints
-wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
-cd ..
+
+# 2. SAM2 checkpoint
+mkdir -p checkpoints && wget -P checkpoints \
+  https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
+
+# 3. local LLM (free, no API key)
+curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5:7b
 ```
 
-### LLM backend
-
-- **Claude** (default): `export ANTHROPIC_API_KEY=sk-...`
-- **Local** (`agent.backend=local`): run any OpenAI-compatible server, e.g.
-  ```bash
-  ollama serve & ollama pull qwen2.5:7b-instruct
-  ```
-  The local 7B model fits alongside SAM2/CLIP on a 4070 for the query stage
-  (build the map first, free the GPU, then query).
-
----
-
-## Get the data (dataset-first path)
-
-Replica ships ground-truth depth, so lifting needs no extra calibration — the
-cleanest first run. Download a scene (e.g. `room_0`) in the Semantic-NeRF /
-iMAP layout so the folder looks like:
-
-```
-data/replica/room_0/
-  results/  frame000000.jpg  depth000000.png  ...
-  traj.txt
-```
-
-(See the dataset docstring in `data/dataset.py` for the exact intrinsics/scale
-assumptions; tweak `dataset.depth_scale` and `K` if your export differs.)
-
----
-
-## Run
+Then, on a posed RGB-D scene (e.g. a Replica room in `data/Replica/room0`):
 
 ```bash
-# build the map once
-python scripts/01_build_map.py --config config/default.yaml \
-    --out runs/room0/map.pkl \
-    --set dataset.root=data/replica/room_0
+# build the map once (caches detections for fast re-fusion)
+python scripts/01_build_map.py --set dataset.root=data/Replica/room0 --out runs/room0/map.pkl
 
-# ask it things (REPL)
-python scripts/02_query.py --map runs/room0/map.pkl
-
-# or a one-shot question
+# ask it things, fully local
 python scripts/02_query.py --map runs/room0/map.pkl \
-    --ask "go to the chair near the window"
+  --set agent.backend=local agent.local_model=qwen2.5:7b --ask "go to the lamp"
 
-# visualize map + highlighted target + nav goal
-python viz/visualize_map.py --map runs/room0/map.pkl --ask "the laptop"
+# re-tune fusion in seconds without re-running SAM2
+python scripts/03_refuse.py --cache runs/room0/detections.pkl --out runs/room0/map.pkl \
+  --set mapping.merge_overlap_threshold=0.2
 
-# switch to the local LLM for any command
-... --set agent.backend=local
+# verify a query by projecting the matched object onto the frames (headless)
+python viz/verify_query.py --map runs/room0/map.pkl --ask "a sofa" \
+  --set dataset.root=data/Replica/room0
 ```
+
+Switch to the cloud backend with `--set agent.backend=claude` (needs `ANTHROPIC_API_KEY`); the rest is identical.
+
+## Design notes & limitations
+
+- **Open-vocabulary by construction.** SAM2 proposes class-agnostic masks; meaning comes only from CLIP. There is no fixed label set anywhere — you can query for things the system was never told about.
+- **Floor-aware fusion.** Room-scale flat surfaces (floor, walls, rug) have huge bounding boxes that would otherwise swallow every object during merging. The fusion step detects and excludes these, and merges object fragments only when geometry *and* appearance agree.
+- **Honest edge case.** Bounding-box fusion struggles with adjacent same-colored regions (a white sofa beside white window blinds can over-merge). This is a known ceiling of box-based fusion; a trained per-Gaussian language field (LangSplat-style) would resolve it and is a natural future upgrade.
+- **Local-LLM spatial answers** are serviceable but limited by the 7B model; navigation grounding is the strongest path.
+
+## Roadmap
+
+- **Project 2 — language-grounded manipulation.** Use SplatQuery as the perception/grounding front-end for a robot arm: ground an instruction to a target object, synthesize a grasp, and execute it with MoveIt2 in simulation. (The ROS2 + Gazebo stack is the next build.)
+- **Language-embedded Gaussian field.** Replace the discrete object map with a trained continuous CLIP-feature field for crisper, label-free retrieval.
 
 ---
 
-## Your own scene (pass 1b)
-
-1. Phone video → frames → `colmap` / `ns-process-data` → `transforms.json`.
-2. `--set dataset.type=nerfstudio dataset.root=data/myroom dataset.depth_source=mono`
-   (mono depth is relative-scale — align it to your COLMAP sparse cloud for
-   metric nav goals; the docstring in `mapping/lifting.py` explains the catch).
-
-## Roadmap (pass 2 — the research-depth upgrade)
-
-- Replace the discrete object map with a **trained language-embedded Gaussian
-  field** (multi-scale CLIP features distilled into 3DGS). The `SemanticMap`
-  public interface (`build`, `query`, `save/load`) stays the same.
-- Add **relevancy rendering**: heatmap a query directly onto the splat view.
-- Add an **A\*/RRT path** on a 2D occupancy slice from the map, not just a goal pose.
-- Quantize + benchmark the local LLM for **edge latency** (the on-board story).
-
----
-
-## Notes
-
-- Designed and written to run on your machine; it has not been executed in the
-  environment it was authored in (no GPU/internet there). Treat the first
-  `01_build_map.py` run as the smoke test and tune `dataset.stride` / intrinsics
-  as needed.
-- Everything downstream of `PosedFrame` is dataset-agnostic; adding a sensor or
-  dataset is one new loader.
-```
+Built by Shiva Kumar Dhandapani. Perception (SAM2, CLIP, 3D lifting) + a local LLM grounding agent, validated on real RGB-D data.
