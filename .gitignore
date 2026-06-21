@@ -12,3 +12,4 @@ runs/
 .idea/
 .vscode/
 *.patch
+*.patch
