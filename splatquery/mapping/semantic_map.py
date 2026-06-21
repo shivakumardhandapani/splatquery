@@ -49,7 +49,8 @@ class SemanticMap:
     # --- construction -------------------------------------------------------
     @classmethod
     def build(cls, detections, voxel_size=0.02, cluster_eps=0.10,
-              cluster_min_points=30, merge_sim_threshold=0.85) -> "SemanticMap":
+              cluster_min_points=30, merge_sim_threshold=0.85,
+              merge_overlap_threshold=0.2) -> "SemanticMap":
         """Fuse per-frame detections into object nodes via spatial clustering."""
         from sklearn.cluster import DBSCAN  # scikit-learn is a transitive dep of open3d-ml; see README
 
@@ -85,7 +86,8 @@ class SemanticMap:
             ))
             nid += 1
 
-        nodes = _merge_duplicates(nodes, merge_sim_threshold, cluster_eps)
+        nodes = _merge_nodes(nodes, merge_sim_threshold, cluster_eps,
+                             merge_overlap_threshold)
         return cls(nodes, clip_dim)
 
     # --- query --------------------------------------------------------------
@@ -124,34 +126,89 @@ def _voxel_downsample(points: np.ndarray, voxel: float) -> np.ndarray:
     return points[idx]
 
 
-def _merge_duplicates(nodes, sim_threshold, dist_eps):
-    """Merge nodes that are both spatially close and semantically similar."""
-    merged, used = [], set()
-    for i, a in enumerate(nodes):
-        if i in used:
+def _box_volume(node) -> float:
+    return float(np.prod(np.clip(node.bbox_max - node.bbox_min, 1e-6, None)))
+
+
+def _is_structural(node, struct_size: float) -> bool:
+    """Floor / wall / ceiling / rug: spans more than `struct_size` m on >=2 axes.
+    These are background surfaces, not graspable objects, and their room-sized
+    boxes would otherwise swallow every object during merging - so we never
+    merge them into anything."""
+    ext = node.bbox_max - node.bbox_min
+    return int(np.sum(ext > struct_size)) >= 2
+
+
+def _containment(a, b) -> float:
+    """Fraction of the smaller box's volume lying inside the intersection."""
+    lo = np.maximum(a.bbox_min, b.bbox_min)
+    hi = np.minimum(a.bbox_max, b.bbox_max)
+    inter = float(np.prod(np.clip(hi - lo, 0.0, None)))
+    if inter <= 0.0:
+        return 0.0
+    return inter / min(_box_volume(a), _box_volume(b))
+
+
+def _merge_nodes(nodes, sim_threshold, dist_eps, overlap_threshold,
+                 struct_size=1.5, size_ratio_min=0.1):
+    """Conservatively merge fragments of the same object via union-find.
+
+    A pair is merged only if ALL hold:
+      - neither node is a large structural surface (floor/wall/ceiling/rug), so
+        background can never swallow objects;
+      - their boxes are comparable in size (smaller >= size_ratio_min of larger),
+        blocking a big node from absorbing tiny distinct objects;
+      - the smaller box is substantially contained in the other (> overlap_threshold);
+      - AND the two look alike (CLIP cosine > sim_threshold).
+    Requiring both geometry and appearance keeps the merge safe; union-find makes
+    it transitive so chained fragments collapse into one object.
+    """
+    n = len(nodes)
+    if n == 0:
+        return nodes
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for i in range(n):
+        if _is_structural(nodes[i], struct_size):
             continue
-        group = [a]
-        for j in range(i + 1, len(nodes)):
-            if j in used:
+        for j in range(i + 1, n):
+            a, b = nodes[i], nodes[j]
+            if _is_structural(b, struct_size):
                 continue
-            b = nodes[j]
-            close = np.linalg.norm(a.centroid - b.centroid) < (dist_eps * 1.5)
+            va, vb = _box_volume(a), _box_volume(b)
+            comparable = min(va, vb) / max(va, vb) > size_ratio_min
+            contained = _containment(a, b) > overlap_threshold
             similar = float(a.embedding @ b.embedding) > sim_threshold
-            if close and similar:
-                group.append(b)
-                used.add(j)
+            if comparable and contained and similar:
+                union(i, j)
+
+    groups: dict[int, list] = {}
+    for idx in range(n):
+        groups.setdefault(find(idx), []).append(nodes[idx])
+
+    merged = []
+    for k, group in enumerate(groups.values()):
         if len(group) == 1:
-            merged.append(a)
+            node = group[0]
+            node.node_id = k
+            merged.append(node)
             continue
         pts = np.concatenate([g.points for g in group], axis=0)
         w = np.array([g.n_detections for g in group], dtype=np.float32)
         emb = np.average(np.stack([g.embedding for g in group]), axis=0, weights=w)
         emb /= (np.linalg.norm(emb) + 1e-8)
         merged.append(ObjectNode(
-            node_id=len(merged), centroid=pts.mean(axis=0),
+            node_id=k, centroid=pts.mean(axis=0),
             bbox_min=pts.min(axis=0), bbox_max=pts.max(axis=0),
             embedding=emb.astype(np.float32),
             n_detections=int(w.sum()), points=pts.astype(np.float32)))
-    for k, n in enumerate(merged):
-        n.node_id = k
     return merged

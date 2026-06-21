@@ -23,13 +23,32 @@ from .llm import LLMBackend, parse_json
 
 _PLAN_SYSTEM = (
     "You are the language-grounding module of a robot that has a 3D semantic map "
-    "of its environment. Given a user instruction, decide the intent and extract "
-    "what physical object(s) the robot should locate. Be concrete and visual: the "
-    "target phrases are matched against CLIP image embeddings, so prefer common, "
-    "concrete noun phrases a vision model would recognize."
+    "of its environment. Classify the user's instruction and extract the target "
+    "object(s).\n\n"
+    "INTENT - choose carefully:\n"
+    "  navigate = a COMMAND to move/go/approach an object "
+    "(e.g. 'go to the sofa', 'move to the lamp', 'take me to the chair').\n"
+    "  ask = a QUESTION about the scene. If the instruction contains or starts "
+    "with what / where / which / how many / is there / are there / describe / "
+    "tell me, it is ALWAYS 'ask', even though it names an object.\n"
+    "When a sentence is phrased as a question, choose 'ask' - do NOT default to "
+    "navigate just because an object is mentioned.\n\n"
+    "Target phrases are matched against CLIP image embeddings, so prefer common, "
+    "concrete visual noun phrases a vision model would recognize."
 )
 
-_PLAN_USER = """Instruction: "{instruction}"
+_PLAN_USER = """Examples:
+Instruction: "go to the sofa"
+{{"intent": "navigate", "target": "sofa", "phrases": ["sofa", "couch"], "relation": null}}
+Instruction: "what is near the sofa?"
+{{"intent": "ask", "target": "sofa", "phrases": ["sofa", "couch"], "relation": "near"}}
+Instruction: "how many chairs are there?"
+{{"intent": "ask", "target": "chair", "phrases": ["chair"], "relation": null}}
+Instruction: "bring me to the potted plant"
+{{"intent": "navigate", "target": "potted plant", "phrases": ["potted plant", "houseplant"], "relation": null}}
+
+Now do this one.
+Instruction: "{instruction}"
 
 Return JSON with exactly these fields:
 {{

@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from splatquery.config import load_config
-from splatquery.pipeline import build_map
+from splatquery.pipeline import extract_detections, fuse_detections, save_detections
 
 
 def main():
@@ -26,7 +26,14 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config, args.overrides)
-    smap = build_map(cfg)
+    detections = extract_detections(cfg)
+
+    # Cache the expensive detections next to the map so fusion can be re-tuned
+    # in seconds with scripts/03_refuse.py (no SAM2 rerun).
+    cache_path = str(Path(args.out).with_name("detections.pkl"))
+    save_detections(detections, cache_path)
+
+    smap = fuse_detections(detections, cfg)
     smap.save(args.out)
     print(f"[done] saved map with {len(smap)} objects -> {args.out}")
 

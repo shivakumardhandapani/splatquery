@@ -25,7 +25,8 @@ mapping:
   voxel_size: 0.02            # downsample point cloud (m) before fusion
   cluster_eps: 0.10           # DBSCAN epsilon for merging detections into objects (m)
   cluster_min_points: 30      # min points for a valid object node
-  merge_sim_threshold: 0.85   # cosine sim above which nearby detections are treated as same object
+  merge_sim_threshold: 0.80   # cosine sim above which nearby detections are treated as same object
+  merge_overlap_threshold: 0.2  # bbox intersection (vs smaller box) above which fragments merge
 
 agent:
   backend: claude             # claude | local   ("design for both" -> swap here, nothing else changes)
